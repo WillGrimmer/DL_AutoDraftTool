@@ -1,0 +1,2 @@
+# For the desktop GUI (draft_gui.py)
+PyQt6>=6.4
