@@ -138,8 +138,12 @@ def minimax(team_a_picks, team_b_picks, available_heroes, turn_index, alpha, bet
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def computer_pick(team_a_picks, team_b_picks, available_heroes, turn_index):
-    """Choose best hero for Team A at this turn using minimax."""
+def computer_pick(team_a_picks, team_b_picks, available_heroes, turn_index, pick_for_team_a=True):
+    """
+    Choose best hero for the given team at this turn using minimax.
+    pick_for_team_a=True: pick for Team A (first picker, maximizing).
+    pick_for_team_a=False: pick for Team B (second picker, minimizing).
+    """
     global _minimax_nodes, _trans_hits
     _minimax_nodes = 0
     _trans_hits = 0
@@ -147,30 +151,42 @@ def computer_pick(team_a_picks, team_b_picks, available_heroes, turn_index):
 
     available_list = sorted(available_heroes)
     n = len(available_list)
-    print(f"[computer_pick] evaluating {n} heroes (turn {turn_index + 1}/{NUM_PICKS}), "
+    side = "A" if pick_for_team_a else "B"
+    print(f"[computer_pick] Team {side}, evaluating {n} heroes (turn {turn_index + 1}/{NUM_PICKS}), "
           f"MAX_DEPTH={MAX_DEPTH}, BEAM_WIDTH={BEAM_WIDTH}...", flush=True)
 
-    # Order root candidates too
-    root_candidates = _order_moves(available_list, team_a_picks, team_b_picks, is_maximizing=True)
-    # At the root we always try ALL candidates (beam only applies inside recursion)
-    # But you can cap here too if desired.
+    root_candidates = _order_moves(available_list, team_a_picks, team_b_picks, is_maximizing=pick_for_team_a)
 
-    best_score = -math.inf
-    best_hero = None
-    alpha = -math.inf
-
-    for i, hero in enumerate(root_candidates):
-        print(f"  trying hero {i + 1}/{len(root_candidates)} (id={hero})...", flush=True)
-        sys.stdout.flush()
-        new_a = team_a_picks + [hero]
-        # Root already expanded 1 ply, so budget remaining = MAX_DEPTH - 1
-        score = minimax(new_a, team_b_picks, available_heroes - {hero},
-                        turn_index + 1, alpha, math.inf, MAX_DEPTH - 1)
-        if score > best_score:
-            best_score = score
-            best_hero = hero
-        if best_score > alpha:
-            alpha = best_score   # tighten alpha across root siblings
+    if pick_for_team_a:
+        best_score = -math.inf
+        best_hero = None
+        alpha = -math.inf
+        for i, hero in enumerate(root_candidates):
+            print(f"  trying hero {i + 1}/{len(root_candidates)} (id={hero})...", flush=True)
+            sys.stdout.flush()
+            new_a = team_a_picks + [hero]
+            score = minimax(new_a, team_b_picks, available_heroes - {hero},
+                            turn_index + 1, alpha, math.inf, MAX_DEPTH - 1)
+            if score > best_score:
+                best_score = score
+                best_hero = hero
+            if best_score > alpha:
+                alpha = best_score
+    else:
+        best_score = math.inf
+        best_hero = None
+        beta = math.inf
+        for i, hero in enumerate(root_candidates):
+            print(f"  trying hero {i + 1}/{len(root_candidates)} (id={hero})...", flush=True)
+            sys.stdout.flush()
+            new_b = team_b_picks + [hero]
+            score = minimax(team_a_picks, new_b, available_heroes - {hero},
+                            turn_index + 1, -math.inf, beta, MAX_DEPTH - 1)
+            if score < best_score:
+                best_score = score
+                best_hero = hero
+            if best_score < beta:
+                beta = best_score
 
     print(f"[computer_pick] done. nodes={_minimax_nodes}, trans_hits={_trans_hits}, "
           f"best_hero={best_hero}, score={best_score:.4f}", flush=True)
@@ -181,29 +197,48 @@ def computer_pick(team_a_picks, team_b_picks, available_heroes, turn_index):
 # Ban logic (Team A chooses which hero to ban)
 # ---------------------------------------------------------------------------
 
-def computer_ban(team_a_picks, team_b_picks, available_heroes, phase):
+def computer_ban(team_a_picks, team_b_picks, available_heroes, phase, ban_for_team_a=True):
     """
-    Choose one hero for Team A to ban. Phase 1 = before any picks; Phase 2 = after 3 picks each.
-    Phase 1: ban the 2nd most valuable hero (so we keep the best for our first pick).
-    Phase 2: ban the hero that would help Team B the most.
+    Choose one hero for the given team to ban.
+    ban_for_team_a=True: ban for Team A (first picker). Phase 1: ban 2nd best for us. Phase 2: ban what helps B most.
+    ban_for_team_a=False: ban for Team B (second picker). Phase 1: ban what helps A most. Phase 2: ban what helps A most.
     """
     available_list = sorted(available_heroes)
     if not available_list:
         return None
-    if phase == 1:
-        # Rank by value to us (evaluate([hero], [])); ban 2nd best so we can pick the best first
-        scored = [(hero, evaluate([hero], [])) for hero in available_list]
-        scored.sort(key=lambda x: x[1], reverse=True)  # best first
-        if len(scored) < 2:
-            return scored[0][0] if scored else None
-        return scored[1][0]  # 2nd most valuable
+    if ban_for_team_a:
+        if phase == 1:
+            scored = [(hero, evaluate([hero], [])) for hero in available_list]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            if len(scored) < 2:
+                return scored[0][0] if scored else None
+            return scored[1][0]
+        else:
+            best_ban = None
+            worst_score = math.inf
+            for hero in available_list:
+                score = evaluate(team_a_picks, team_b_picks + [hero])
+                if score < worst_score:
+                    worst_score = score
+                    best_ban = hero
+            return best_ban
     else:
-        # Phase 2: we have 3 each; ban the hero that would help B most if added to their team
-        best_ban = None
-        worst_score = math.inf
-        for hero in available_list:
-            score = evaluate(team_a_picks, team_b_picks + [hero])
-            if score < worst_score:
-                worst_score = score
-                best_ban = hero
-    return best_ban
+        # Ban for Team B: remove what would help A most
+        if phase == 1:
+            best_ban = None
+            best_score = -math.inf
+            for hero in available_list:
+                score = evaluate([hero], [])  # how good for A if A had this hero
+                if score > best_score:
+                    best_score = score
+                    best_ban = hero
+            return best_ban
+        else:
+            best_ban = None
+            best_score = -math.inf
+            for hero in available_list:
+                score = evaluate(team_a_picks + [hero], team_b_picks)
+                if score > best_score:
+                    best_score = score
+                    best_ban = hero
+            return best_ban

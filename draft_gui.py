@@ -16,10 +16,12 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QFrame,
     QGridLayout,
     QMessageBox,
+    QStackedWidget,
     QTextEdit,
     QSizePolicy,
 )
@@ -117,19 +119,24 @@ class HeroPortraitLabel(QWidget):
 
 class DraftMainWindow(QMainWindow):
     # Signals for cross-thread callbacks (emit from worker, slot runs on main thread)
-    _phase1_ban_done = pyqtSignal(int)
-    _phase2_ban_done = pyqtSignal(int)
+    _phase1_ban_a_done = pyqtSignal(int)
+    _phase1_ban_b_done = pyqtSignal(int)
+    _phase2_ban_a_done = pyqtSignal(int)
+    _phase2_ban_b_done = pyqtSignal(int)
     _computer_pick_done = pyqtSignal(int)
 
     def __init__(self):
         super().__init__()
-        self._phase1_ban_done.connect(self._on_phase1_ban_a_done)
-        self._phase2_ban_done.connect(self._on_phase2_ban_a_done)
+        self._phase1_ban_a_done.connect(self._on_phase1_ban_a_done)
+        self._phase1_ban_b_done.connect(self._on_phase1_ban_b_done)
+        self._phase2_ban_a_done.connect(self._on_phase2_ban_a_done)
+        self._phase2_ban_b_done.connect(self._on_phase2_ban_b_done)
         self._computer_pick_done.connect(self._on_computer_pick_done)
         self.setWindowTitle("Draft Tool")
         self.setMinimumSize(720, 620)
         self.resize(820, 680)
 
+        self.human_team_a = None  # True = human is first picker (A), False = human is second (B)
         self.team_a_picks = []
         self.team_b_picks = []
         self.available_heroes = set(full_hero_pool)
@@ -139,18 +146,35 @@ class DraftMainWindow(QMainWindow):
 
         self._hero_widgets = {}  # hero_id -> HeroPortraitLabel
         self._build_ui()
-        self._refresh_rosters()
-        self._refresh_portraits()
-        self._log("Draft started. Phase 1 bans: Team A bans first.")
-        self._schedule_computer_phase1_ban_a()
+        # Start on team selection; draft content is hidden until choice is made
+        self._stack.setCurrentWidget(self._team_select_page)
 
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        main_layout = QVBoxLayout(central)
+
+        self._stack = QStackedWidget()
+        # ---- Team selection page ----
+        self._team_select_page = QWidget()
+        select_layout = QVBoxLayout(self._team_select_page)
+        select_layout.addWidget(QLabel("Choose your team:"))
+        select_layout.addWidget(QLabel("Team A picks first in each round. Team B picks second."))
+        btn_a = QPushButton("Play as Team A (pick first)")
+        btn_a.clicked.connect(lambda: self._on_team_chosen(True))
+        btn_b = QPushButton("Play as Team B (pick second)")
+        btn_b.clicked.connect(lambda: self._on_team_chosen(False))
+        select_layout.addWidget(btn_a)
+        select_layout.addWidget(btn_b)
+        select_layout.addStretch()
+        self._stack.addWidget(self._team_select_page)
+
+        # ---- Draft page ----
+        self._draft_page = QWidget()
+        layout = QVBoxLayout(self._draft_page)
         layout.setSpacing(10)
 
-        self.status_label = QLabel("Team A is banning...")
+        self.status_label = QLabel("")
         self.status_label.setStyleSheet("font-size: 13px; font-weight: bold;")
         layout.addWidget(self.status_label)
 
@@ -158,7 +182,8 @@ class DraftMainWindow(QMainWindow):
         team_a_frame = QFrame()
         team_a_frame.setFrameStyle(QFrame.Shape.StyledPanel)
         team_a_layout = QVBoxLayout(team_a_frame)
-        team_a_layout.addWidget(QLabel("Team A (Computer)"))
+        self.team_a_title = QLabel("Team A")  # updated in _update_team_labels
+        team_a_layout.addWidget(self.team_a_title)
         self.team_a_roster = QLabel("")
         self.team_a_roster.setWordWrap(True)
         self.team_a_roster.setStyleSheet("color: #8af;")
@@ -168,7 +193,8 @@ class DraftMainWindow(QMainWindow):
         team_b_frame = QFrame()
         team_b_frame.setFrameStyle(QFrame.Shape.StyledPanel)
         team_b_layout = QVBoxLayout(team_b_frame)
-        team_b_layout.addWidget(QLabel("Team B (You)"))
+        self.team_b_title = QLabel("Team B")
+        team_b_layout.addWidget(self.team_b_title)
         self.team_b_roster = QLabel("")
         self.team_b_roster.setWordWrap(True)
         self.team_b_roster.setStyleSheet("color: #8f8;")
@@ -206,16 +232,87 @@ class DraftMainWindow(QMainWindow):
         self.log_text.setStyleSheet("font-family: Consolas; font-size: 9px;")
         layout.addWidget(self.log_text)
 
+        self._stack.addWidget(self._draft_page)
+        main_layout.addWidget(self._stack)
+
+    def _update_team_labels(self):
+        if self.human_team_a is None:
+            return
+        if self.human_team_a:
+            self.team_a_title.setText("Team A (You)")
+            self.team_b_title.setText("Team B (Computer)")
+        else:
+            self.team_a_title.setText("Team A (Computer)")
+            self.team_b_title.setText("Team B (You)")
+
+    def _on_team_chosen(self, human_team_a):
+        self.human_team_a = human_team_a
+        self._update_team_labels()
+        self._refresh_rosters()
+        self._refresh_portraits()
+        self._stack.setCurrentWidget(self._draft_page)
+        self._log("Draft started. Team A bans first (Phase 1).")
+        self._run_current_phase()
+
+    def _is_computer_turn(self):
+        """True if the current phase is the computer's turn to act."""
+        if self.phase == "phase1_ban_a":
+            return not self.human_team_a
+        if self.phase == "phase1_ban_b":
+            return self.human_team_a
+        if self.phase == "phase2_ban_b":
+            return self.human_team_a  # B bans first in phase 2; B is computer when human is A
+        if self.phase == "phase2_ban_a":
+            return not self.human_team_a
+        if self.phase.startswith("pick_"):
+            turn = int(self.phase.split("_")[1])
+            return TURN_ORDER[turn] == TEAM_A and not self.human_team_a or TURN_ORDER[turn] == TEAM_B and self.human_team_a
+        return False
+
+    def _run_current_phase(self):
+        """Start computer action if it's computer's turn; otherwise status is already set for human."""
+        if self.phase == "phase1_ban_a":
+            if self._is_computer_turn():
+                self._schedule_computer_phase1_ban_a()
+            else:
+                self._set_status("Your turn to ban (Phase 1). Click a hero to ban.")
+                self._log("Your turn to ban. Click a hero.")
+        elif self.phase == "phase1_ban_b":
+            if self._is_computer_turn():
+                self._schedule_computer_phase1_ban_b()
+            else:
+                self._set_status("Your turn to ban (Phase 1). Click a hero to ban.")
+                self._log("Your turn to ban. Click a hero.")
+        elif self.phase == "phase2_ban_b":
+            if self._is_computer_turn():
+                self._schedule_computer_phase2_ban_b()
+            else:
+                self._set_status("Phase 2 bans: Your turn to ban first. Click a hero to ban.")
+                self._log("Phase 2 bans. Your turn to ban. Click a hero.")
+        elif self.phase == "phase2_ban_a":
+            if self._is_computer_turn():
+                self._schedule_computer_phase2_ban_a()
+            else:
+                self._set_status("Phase 2 bans: Your turn to ban. Click a hero to ban.")
+                self._log("Phase 2 bans. Your turn to ban. Click a hero.")
+        elif self.phase.startswith("pick_"):
+            self._advance_pick_phase()
+
     def _on_hero_clicked(self, hero_id):
         if self.waiting_for_ai or hero_id not in self.available_heroes:
             return
-        if self.phase == "phase1_ban_b":
+        if self.phase == "phase1_ban_a":
+            self._do_phase1_ban_a(hero_id)
+        elif self.phase == "phase1_ban_b":
             self._do_phase1_ban_b(hero_id)
         elif self.phase == "phase2_ban_b":
             self._do_phase2_ban_b(hero_id)
+        elif self.phase == "phase2_ban_a":
+            self._do_phase2_ban_a(hero_id)
         elif self.phase.startswith("pick_"):
             turn = int(self.phase.split("_")[1])
-            if TURN_ORDER[turn] == TEAM_B:
+            is_human_turn = (TURN_ORDER[turn] == TEAM_A and self.human_team_a) or (TURN_ORDER[turn] == TEAM_B and not self.human_team_a)
+            if is_human_turn:
                 self._do_human_pick(hero_id)
 
     def _log(self, msg):
@@ -239,11 +336,18 @@ class DraftMainWindow(QMainWindow):
         self.waiting_for_ai = True
         self._set_status("Team A is banning...")
         self._log("Team A is choosing a ban...")
-
         def run():
-            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=1)
-            self._phase1_ban_done.emit(ban)
+            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=1, ban_for_team_a=True)
+            self._phase1_ban_a_done.emit(ban)
+        threading.Thread(target=run, daemon=True).start()
 
+    def _schedule_computer_phase1_ban_b(self):
+        self.waiting_for_ai = True
+        self._set_status("Team B is banning...")
+        self._log("Team B is choosing a ban...")
+        def run():
+            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=1, ban_for_team_a=False)
+            self._phase1_ban_b_done.emit(ban)
         threading.Thread(target=run, daemon=True).start()
 
     def _on_phase1_ban_a_done(self, hero_id):
@@ -253,10 +357,19 @@ class DraftMainWindow(QMainWindow):
         self._refresh_portraits()
         self._refresh_rosters()
         self.phase = "phase1_ban_b"
-        self._set_status("Your turn to ban (Phase 1). Click a hero portrait to ban.")
-        self._log("Your turn to ban. Click a hero.")
+        self._run_current_phase()
 
-    def _do_phase1_ban_b(self, hero_id):
+    def _do_phase1_ban_a(self, hero_id):
+        """Human bans for Team A (Phase 1)."""
+        self.available_heroes.discard(hero_id)
+        self._log(f"Team A bans {hero_name(hero_id)}.")
+        self._refresh_portraits()
+        self._refresh_rosters()
+        self.phase = "phase1_ban_b"
+        self._run_current_phase()
+
+    def _on_phase1_ban_b_done(self, hero_id):
+        self.waiting_for_ai = False
         self.available_heroes.discard(hero_id)
         self._log(f"Team B bans {hero_name(hero_id)}.")
         self._refresh_portraits()
@@ -265,15 +378,32 @@ class DraftMainWindow(QMainWindow):
         self.turn_index = 0
         self._advance_pick_phase()
 
+    def _do_phase1_ban_b(self, hero_id):
+        """Human bans for Team B (Phase 1)."""
+        self.available_heroes.discard(hero_id)
+        self._log(f"Team B bans {hero_name(hero_id)}.")
+        self._refresh_portraits()
+        self._refresh_rosters()
+        self.phase = "pick_0"
+        self.turn_index = 0
+        self._advance_pick_phase()
+
+    def _schedule_computer_phase2_ban_b(self):
+        self.waiting_for_ai = True
+        self._set_status("Team B is banning (Phase 2)...")
+        self._log("Team B is choosing a ban...")
+        def run():
+            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=2, ban_for_team_a=False)
+            self._phase2_ban_b_done.emit(ban)
+        threading.Thread(target=run, daemon=True).start()
+
     def _schedule_computer_phase2_ban_a(self):
         self.waiting_for_ai = True
         self._set_status("Team A is banning (Phase 2)...")
         self._log("Team A is choosing a ban...")
-
         def run():
-            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=2)
-            self._phase2_ban_done.emit(ban)
-
+            ban = computer_ban(self.team_a_picks, self.team_b_picks, self.available_heroes, phase=2, ban_for_team_a=True)
+            self._phase2_ban_a_done.emit(ban)
         threading.Thread(target=run, daemon=True).start()
 
     def _on_phase2_ban_a_done(self, hero_id):
@@ -286,60 +416,89 @@ class DraftMainWindow(QMainWindow):
         self.turn_index = 6
         self._advance_pick_phase()
 
-    def _do_phase2_ban_b(self, hero_id):
+    def _on_phase2_ban_b_done(self, hero_id):
+        self.waiting_for_ai = False
         self.available_heroes.discard(hero_id)
         self._log(f"Team B bans {hero_name(hero_id)}.")
         self._refresh_portraits()
         self._refresh_rosters()
         self.phase = "phase2_ban_a"
-        self._schedule_computer_phase2_ban_a()
+        self._run_current_phase()
+
+    def _do_phase2_ban_b(self, hero_id):
+        """Human bans for Team B (Phase 2, B bans first)."""
+        self.available_heroes.discard(hero_id)
+        self._log(f"Team B bans {hero_name(hero_id)}.")
+        self._refresh_portraits()
+        self._refresh_rosters()
+        self.phase = "phase2_ban_a"
+        self._run_current_phase()
+
+    def _do_phase2_ban_a(self, hero_id):
+        """Human bans for Team A (Phase 2)."""
+        self.available_heroes.discard(hero_id)
+        self._log(f"Team A bans {hero_name(hero_id)}.")
+        self._refresh_portraits()
+        self._refresh_rosters()
+        self.phase = "pick_6"
+        self.turn_index = 6
+        self._advance_pick_phase()
 
     def _advance_pick_phase(self):
         if self.turn_index >= NUM_PICKS:
             self._finish_draft()
             return
         current_team = TURN_ORDER[self.turn_index]
-        if current_team == TEAM_A:
+        if (current_team == TEAM_A and not self.human_team_a) or (current_team == TEAM_B and self.human_team_a):
             self._schedule_computer_pick()
         else:
             self._set_status(f"Your turn to pick ({self.turn_index + 1}/{NUM_PICKS}). Click a hero portrait.")
             self._log("Your turn to pick. Click a hero.")
 
     def _schedule_computer_pick(self):
+        turn_index = self.turn_index
+        pick_for_team_a = TURN_ORDER[turn_index] == TEAM_A
+        side = "A" if pick_for_team_a else "B"
         self.waiting_for_ai = True
-        self._set_status(f"Team A is picking ({self.turn_index + 1}/{NUM_PICKS})...")
-        self._log("Team A is thinking...")
+        self._set_status(f"Team {side} is picking ({self.turn_index + 1}/{NUM_PICKS})...")
+        self._log(f"Team {side} is thinking...")
         team_a = list(self.team_a_picks)
         team_b = list(self.team_b_picks)
         avail = set(self.available_heroes)
-        turn_index = self.turn_index
 
         def run():
-            hero = computer_pick(team_a, team_b, avail, turn_index)
+            hero = computer_pick(team_a, team_b, avail, turn_index, pick_for_team_a=pick_for_team_a)
             self._computer_pick_done.emit(hero)
-
         threading.Thread(target=run, daemon=True).start()
 
     def _on_computer_pick_done(self, hero_id):
         self.waiting_for_ai = False
-        self.team_a_picks.append(hero_id)
+        current_team = TURN_ORDER[self.turn_index]
+        if current_team == TEAM_A:
+            self.team_a_picks.append(hero_id)
+            self._log(f"Team A picks {hero_name(hero_id)}.")
+        else:
+            self.team_b_picks.append(hero_id)
+            self._log(f"Team B picks {hero_name(hero_id)}.")
         self.available_heroes.discard(hero_id)
-        self._log(f"Team A picks {hero_name(hero_id)}.")
         self._refresh_portraits()
         self._refresh_rosters()
         self.turn_index += 1
         if self.turn_index == 6:
             self.phase = "phase2_ban_b"
-            self._set_status("Phase 2 bans: Your turn to ban first. Click a hero to ban.")
-            self._log("Phase 2 bans. Your turn to ban. Click a hero.")
+            self._run_current_phase()
         else:
             self.phase = f"pick_{self.turn_index}"
             self._advance_pick_phase()
 
     def _do_human_pick(self, hero_id):
-        self.team_b_picks.append(hero_id)
+        if self.human_team_a:
+            self.team_a_picks.append(hero_id)
+            self._log(f"Team A picks {hero_name(hero_id)}.")
+        else:
+            self.team_b_picks.append(hero_id)
+            self._log(f"Team B picks {hero_name(hero_id)}.")
         self.available_heroes.discard(hero_id)
-        self._log(f"Team B picks {hero_name(hero_id)}.")
         self._refresh_portraits()
         self._refresh_rosters()
         self.turn_index += 1
@@ -356,14 +515,19 @@ class DraftMainWindow(QMainWindow):
         self.phase = "done"
         score = evaluate(self.team_a_picks, self.team_b_picks)
         self._set_status("Draft complete.")
+        # Score is from first picker (Team A)'s perspective; phrase it for the player
+        if self.human_team_a:
+            score_meaning = "positive = favorable to you"
+        else:
+            score_meaning = "positive = favorable to computer (first picker)"
         self._log("")
         self._log("========== Final draft ==========")
         self._log(f"Team A: {', '.join(hero_name(h) for h in self.team_a_picks)}")
         self._log(f"Team B: {', '.join(hero_name(h) for h in self.team_b_picks)}")
-        self._log(f"Evaluation (positive = favorable to Team A): {score:.2f}")
+        self._log(f"Evaluation ({score_meaning}): {score:.2f}")
         QMessageBox.information(
             self, "Draft complete",
-            f"Draft complete.\n\nScore: {score:.2f}\n(positive = favorable to Team A)",
+            f"Draft complete.\n\nScore: {score:.2f}\n({score_meaning})",
         )
 
 

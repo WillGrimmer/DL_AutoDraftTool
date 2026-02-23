@@ -132,7 +132,7 @@ def run_draft():
     print("Team A:", _format_team(team_a_picks))
     print("Team B:", _format_team(team_b_picks))
     final_score = evaluate(team_a_picks, team_b_picks)
-    print(f"Final evaluation score (positive = favorable to Team A): {final_score:.2f}")
+    print(f"Final evaluation score (positive = favorable to first picker / Team A): {final_score:.2f}")
 
 
 if __name__ == "__main__":

@@ -39,8 +39,12 @@ def synergy_score(team):
 def evaluate(team_a, team_b):
     """
     Single scalar score from the perspective of the maximizing player (Team A).
-    Combines matchup and synergy with configurable weights.
+    Zero = even; positive = Team A favored, negative = Team B favored.
+    Combines matchup (centered so 0.5 = even) and synergy difference.
+    Matchup term is scaled by 2 so that clear imbalances (e.g. 0.3 vs 0.7) produce
+    a noticeable score instead of clustering near zero.
     """
-    matchup = pairwise_score(team_a, team_b)
+    matchup = pairwise_score(team_a, team_b)  # A's win rate vs B, in [0, 1]
     synergy = synergy_score(team_a) - synergy_score(team_b)
-    return W1_MATCHUP * matchup + W2_SYNERGY * synergy
+    # Center and scale: 2 * (matchup - 0.5) is in [-1, 1], so term in [-W1, W1]
+    return W1_MATCHUP * 2 * (matchup - 0.5) + W2_SYNERGY * synergy
